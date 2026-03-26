@@ -1,0 +1,6 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/loadconnex/:path*", "destination": "/api/loadconnex/:path*" }
+  ]
+}
