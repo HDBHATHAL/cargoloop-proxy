@@ -1,4 +1,4 @@
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -7,7 +7,6 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  // Keys come from Vercel environment variables — never exposed to the browser
   const vendorKey = process.env.LOADCONNEX_VENDOR_KEY;
   const memberKey = process.env.LOADCONNEX_MEMBER_KEY;
 
@@ -16,7 +15,7 @@ export default async function handler(req, res) {
   }
 
   const pathSegments = req.url.replace(/^\/api\/loadconnex\/?/, "");
-  const targetUrl = `https://lx-api.loadconnex.com/v1/${pathSegments}`;
+  const targetUrl = "https://lx-api.loadconnex.com/v1/" + pathSegments;
 
   try {
     const fetchOpts = {
@@ -24,8 +23,8 @@ export default async function handler(req, res) {
       headers: {
         "X-API-key-vendor": vendorKey,
         "X-API-key-member": memberKey,
-        Accept: "application/json",
-      },
+        "Accept": "application/json"
+      }
     };
 
     if (["POST", "PUT", "PATCH"].includes(req.method) && req.body) {
@@ -39,10 +38,10 @@ export default async function handler(req, res) {
     res.status(response.status);
     try {
       res.json(JSON.parse(data));
-    } catch {
+    } catch (e) {
       res.send(data);
     }
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
-}
+};
