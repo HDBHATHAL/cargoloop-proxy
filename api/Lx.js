@@ -14,8 +14,16 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "API keys not configured in environment variables" });
   }
 
-  const pathSegments = req.url.replace(/^\/api\/loadconnex\/?/, "");
-  const targetUrl = "https://lx-api.loadconnex.com/v1/" + pathSegments;
+  // The LoadConnex path comes via ?p= query parameter
+  // Example: /api/lx?p=loads/155209
+  // Example: /api/lx?p=loads&filter_life_cycle=In+Transit
+  const url = new URL(req.url, "https://localhost");
+  const lcPath = url.searchParams.get("p") || "";
+  url.searchParams.delete("p");
+
+  // Rebuild remaining query params (everything except p)
+  const remaining = url.searchParams.toString();
+  const targetUrl = "https://lx-api.loadconnex.com/v1/" + lcPath + (remaining ? "?" + remaining : "");
 
   try {
     const fetchOpts = {
