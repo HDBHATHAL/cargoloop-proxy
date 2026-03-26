@@ -1,17 +1,18 @@
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-API-key-vendor, X-API-key-member");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
-  const vendorKey = req.headers["x-api-key-vendor"];
-  const memberKey = req.headers["x-api-key-member"];
+  // Keys come from Vercel environment variables — never exposed to the browser
+  const vendorKey = process.env.LOADCONNEX_VENDOR_KEY;
+  const memberKey = process.env.LOADCONNEX_MEMBER_KEY;
 
   if (!vendorKey || !memberKey) {
-    return res.status(401).json({ error: "Missing API keys" });
+    return res.status(500).json({ error: "API keys not configured in environment variables" });
   }
 
   const pathSegments = req.url.replace(/^\/api\/loadconnex\/?/, "");
