@@ -165,7 +165,7 @@ function ok(data) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.4.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.5.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -211,6 +211,7 @@ function createServer() {
       trailer_type: z.enum(["Dry Van","Refrigerated","Flatbed","Step Deck","Lowboy","Double Drop","Conestoga","Curtainside","Tanker","Pneumatic","Hopper","Dump","Other"]).describe("Type of trailer required"),
       weight: z.number().int().min(0).max(99999).describe("Shipment weight in lbs"),
       commodity: z.string().describe("Commodity description (e.g. 'Produce', 'Mushrooms')"),
+      max_cargo_value: z.number().int().describe("Max cargo value in cents USD (e.g. 1000000 = $10,000). Required by LoadConnex."),
       post_to_marketplace: z.enum(["no","private_carriers_only","private_with_brokers","public_no_brokers","all"]).describe("Who to post the load to on the marketplace"),
       customer_code: z.string().describe("Customer code to link the load to a customer").optional(),
       customer_reference_number: z.string().describe("Customer's reference number for this load").optional(),
@@ -229,8 +230,8 @@ function createServer() {
         contact_name: z.string().optional(),
       })).min(2).max(10).describe("Array of stops. First must be Pickup, last must be Delivery."),
     },
-    async ({ member_load_number, trailer_type, weight, commodity, post_to_marketplace, customer_code, customer_reference_number, additional_instructions, stops }) => {
-      const body = { trailer_type, weight, commodity, post_to_marketplace, stops, load_tracking_status: "Ready" };
+    async ({ member_load_number, trailer_type, weight, commodity, max_cargo_value, post_to_marketplace, customer_code, customer_reference_number, additional_instructions, stops }) => {
+      const body = { trailer_type, weight, commodity, max_cargo_value: { amount: max_cargo_value, currency: "USD" }, post_to_marketplace, stops };
       if (member_load_number) body.member_load_number = member_load_number;
       if (customer_code) body.customer_code = customer_code;
       if (customer_reference_number) body.customer_reference_number = customer_reference_number;
