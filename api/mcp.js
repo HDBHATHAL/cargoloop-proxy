@@ -45,21 +45,36 @@ const rateLimiter = {
 
 // ── Response cache (read-only, 60s TTL) ─────────────────────
 const cache = new Map();
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL = {
+  position: 15_000,    // 15s — GPS updates frequently
+  loads:    60_000,    // 60s — load list
+  load:     60_000,    // 60s — single load detail
+  fleet:   300_000,    // 5min — drivers/tractors/trailers change rarely
+  docs:     30_000,    // 30s — document list
+};
 
-function cacheGet(key) {
+function cacheGet(key, ttl) {
   const entry = cache.get(key);
   if (!entry) return null;
-  if (Date.now() - entry.ts > CACHE_TTL_MS) { cache.delete(key); return null; }
+  if (Date.now() - entry.ts > ttl) { cache.delete(key); return null; }
   return entry.data;
 }
 
 function cacheSet(key, data) {
   cache.set(key, { data, ts: Date.now() });
-  // Evict entries older than TTL to prevent unbounded growth
   if (cache.size > 200) {
+    const now = Date.now();
     for (const [k, v] of cache) {
-      if (Date.now() - v.ts > CACHE_TTL_MS) cache.delete(k);
+      if (now - v.ts > 300_000) cache.delete(k);
+    }
+  }
+}
+
+// Invalidate all cached entries for a load and its sub-resources after a write
+function cacheInvalidateLoad(load_id) {
+  for (const k of cache.keys()) {
+    if (k.includes(`/loads/${load_id}`) || k.includes("loads?") || k.endsWith("/loads")) {
+      cache.delete(k);
     }
   }
 }
@@ -94,34 +109,62 @@ function lxHeaders(contentType = "application/json") {
   };
 }
 
+function ttlForPath(path) {
+  if (path.includes("/position")) return CACHE_TTL.position;
+  if (path.includes("/documents")) return CACHE_TTL.docs;
+  if (path.match(/^loads\/\d+$/)) return CACHE_TTL.load;
+  if (path.startsWith("loads")) return CACHE_TTL.loads;
+  if (path.startsWith("drivers") || path.startsWith("tractors") || path.startsWith("trailers")) return CACHE_TTL.fleet;
+  return CACHE_TTL.loads;
+}
+
 async function lxFetch(path, params = {}) {
   const url = new URL(`${LX_BASE}/${path}`);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
   }
+  // Never cache document content (base64 PDFs are huge and single-use)
+  const noCache = path.match(/\/documents\/\d+$/);
   const cacheKey = url.toString();
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-
+  if (!noCache) {
+    const cached = cacheGet(cacheKey, ttlForPath(path));
+    if (cached) return cached;
+  }
   const data = await lxRequest(() => fetch(url.toString(), { headers: lxHeaders() }));
-  cacheSet(cacheKey, data);
+  if (!noCache) cacheSet(cacheKey, data);
   return data;
 }
 
 async function lxWrite(method, path, body, contentType = "application/json") {
-  return lxRequest(() => fetch(`${LX_BASE}/${path}`, {
+  const result = await lxRequest(() => fetch(`${LX_BASE}/${path}`, {
     method,
     headers: lxHeaders(contentType),
     body: contentType === "application/json" ? JSON.stringify(body) : body,
   }));
+  // Invalidate cache for the affected load after any write
+  const m = path.match(/loads\/(\d+)/);
+  if (m) cacheInvalidateLoad(m[1]);
+  // Also bust the loads list cache on create/delete
+  if (path === "loads" && method === "POST") {
+    for (const k of cache.keys()) { if (k.includes("/loads")) cache.delete(k); }
+  }
+  return result;
+}
+
+// Wrap raw DELETE calls through the rate limiter
+async function lxDelete(path) {
+  const result = await lxRequest(() => fetch(`${LX_BASE}/${path}`, { method: "DELETE", headers: lxHeaders() }));
+  const m = path.match(/loads\/(\d+)/);
+  if (m) cacheInvalidateLoad(m[1]);
+  return result;
 }
 
 function ok(data) {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  return { content: [{ type: "text", text: JSON.stringify(data) }] };
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.1.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.3.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -129,11 +172,7 @@ function createServer() {
 
   server.tool(
     "get_loads",
-    `Fetch load summaries from LoadConnex with full filtering, sorting, and pagination.
-Default per_page is 25 — always set this explicitly to avoid large data dumps.
-Dates use RFC 3339 format: YYYY-MM-DDTHH:mmZ (e.g. 2026-03-27T00:00Z).
-filter_status filters by tracking status (e.g. 'Late', 'GPS Signal Lost').
-filter_life_cycle is required — use 'In Transit' for active loads.`,
+    "Fetch WPL load summaries. filter_life_cycle required. Dates: YYYY-MM-DDTHH:mmZ. Returns up to 100 per page.",
     {
       filter_life_cycle: z.enum(["In Transit", "Delivered", "Pending", "Cancelled", "Completed"]).describe("Required. Lifecycle stage to filter by."),
       filter_customer_name: z.string().describe("Partial customer name (e.g. 'Mastronardi', 'Sunset')").optional(),
@@ -147,11 +186,11 @@ filter_life_cycle is required — use 'In Transit' for active loads.`,
       filter_pickup_city_state: z.string().describe("Pickup city and state (e.g. 'Oxnard, CA')").optional(),
       filter_delivery_city_state: z.string().describe("Delivery city and state (e.g. 'Philadelphia, PA')").optional(),
       sort: z.string().describe("Comma-separated sort keys with optional :asc/:desc. Allowed: member_load_number, customer_name, pickup_date_time_local, pickup_city_state, delivery_date_time_local, delivery_city_state, load_tracking_status, carrier_name, driver_name, tractor_unit_number. Max 3.").optional(),
-      per_page: z.number().int().min(1).max(100).default(25).describe("Results per page (1-100). Default 25."),
+      per_page: z.number().int().min(1).max(100).default(100).describe("Results per page (1-100). Default 100."),
       page_no: z.number().int().min(1).default(1).describe("Page number. Default 1."),
     },
     async ({ filter_life_cycle, filter_customer_name, filter_load_number, filter_carrier_driver_tractor, filter_status, filter_pickup_date_time_local_from, filter_pickup_date_time_local_to, filter_delivery_date_time_local_from, filter_delivery_date_time_local_to, filter_pickup_city_state, filter_delivery_city_state, sort, per_page, page_no }) => {
-      const data = await lxFetch("loads", { filter_life_cycle, filter_customer_name, filter_load_number, filter_carrier_driver_tractor, filter_status, filter_pickup_date_time_local_from, filter_pickup_date_time_local_to, filter_delivery_date_time_local_from, filter_delivery_date_time_local_to, filter_pickup_city_state, filter_delivery_city_state, sort, per_page: per_page ?? 25, page_no: page_no ?? 1 });
+      const data = await lxFetch("loads", { filter_life_cycle, filter_customer_name, filter_load_number, filter_carrier_driver_tractor, filter_status, filter_pickup_date_time_local_from, filter_pickup_date_time_local_to, filter_delivery_date_time_local_from, filter_delivery_date_time_local_to, filter_pickup_city_state, filter_delivery_city_state, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 });
       return ok(data);
     }
   );
@@ -165,11 +204,7 @@ filter_life_cycle is required — use 'In Transit' for active loads.`,
 
   server.tool(
     "create_load",
-    `Create a new load in LoadConnex (POST /loads).
-Required: trailer_type, weight, commodity, post_to_marketplace, stops (min 2: first must be Pickup, last must be Delivery).
-Stop fields required: stop_no (starting 1), type, country (US/MX/CA), location_name, location_address, appointment_start_date_time_local, appointment_end_date_time_local.
-Dates: RFC 3339 YYYY-MM-DDTHH:mmZ. Each stop's appointment_end must be after the previous stop's.
-post_to_marketplace values: 'no', 'private_carriers_only', 'private_with_brokers', 'public_no_brokers', 'all'.`,
+    "Create a load (POST /loads). First stop must be Pickup, last must be Delivery. Each stop's appointment_end must be after the previous. post_to_marketplace: no|private_carriers_only|private_with_brokers|public_no_brokers|all.",
     {
       member_load_number: z.string().describe("Your internal WPL load/job number (must be unique)").optional(),
       trailer_type: z.enum(["Dry Van","Refrigerated","Flatbed","Step Deck","Lowboy","Double Drop","Conestoga","Curtainside","Tanker","Pneumatic","Hopper","Dump","Other"]).describe("Type of trailer required"),
@@ -205,10 +240,7 @@ post_to_marketplace values: 'no', 'private_carriers_only', 'private_with_brokers
 
   server.tool(
     "update_load",
-    `Full update of an existing load (PUT /loads/{id}). Must include ALL fields — any omitted field will be deleted.
-Use get_load first to retrieve current values, then send the full object with your changes.
-Cannot update loads with Transfer stops via API (use the UI).
-Cannot update loads assigned to Load Connex carrier.`,
+    "Full replace of a load (PUT). ALL fields required — omitted fields are deleted. Use get_load first. Cannot update Transfer-stop loads or Load Connex-assigned loads.",
     {
       load_id: z.string().describe("Internal LoadConnex load ID"),
       member_load_number: z.string().optional(),
@@ -256,11 +288,7 @@ Cannot update loads assigned to Load Connex carrier.`,
     "delete_load",
     "Delete a load from LoadConnex. This is permanent and cannot be undone.",
     { load_id: z.string().describe("Internal LoadConnex load ID") },
-    async ({ load_id }) => {
-      const res = await fetch(`${LX_BASE}/loads/${load_id}`, { method: "DELETE", headers: lxHeaders() });
-      if (!res.ok) { const t = await res.text(); throw new Error(`LoadConnex ${res.status}: ${t}`); }
-      return ok(await res.json());
-    }
+    async ({ load_id }) => ok(await lxDelete(`loads/${load_id}`))
   );
 
   server.tool(
@@ -283,7 +311,7 @@ Cannot update loads assigned to Load Connex carrier.`,
 
   server.tool(
     "get_document",
-    "Retrieve a specific document's content as base64-encoded PDF. Use the document id from get_documents.",
+    "Get a document's base64 PDF content by document_id.",
     {
       load_id: z.string().describe("Internal LoadConnex load ID"),
       document_id: z.string().describe("Document ID from get_documents"),
@@ -293,10 +321,7 @@ Cannot update loads assigned to Load Connex carrier.`,
 
   server.tool(
     "upload_document",
-    `Upload a new PDF document to a load (POST /loads/{id}/documents).
-Accepted types: 'Rate Confirmation', 'Internal', 'From Driver', 'To Customer'.
-Note: POST will fail if a document of that type already exists — use replace_document instead.
-pdf_base64: base64-encoded PDF string. Max file size 15 MB.`,
+    "Upload a PDF to a load. Fails if that type already exists — use replace_document instead. Max 15 MB.",
     {
       load_id: z.string().describe("Internal LoadConnex load ID"),
       filename: z.string().describe("File name (e.g. 'bol_5655802.pdf')"),
@@ -309,7 +334,7 @@ pdf_base64: base64-encoded PDF string. Max file size 15 MB.`,
 
   server.tool(
     "replace_document",
-    "Replace the content of an existing document (PUT). The filename and type remain unchanged — only the PDF content is replaced. Send raw base64-encoded PDF.",
+    "Replace a document's PDF content. Filename and type unchanged.",
     {
       load_id: z.string().describe("Internal LoadConnex load ID"),
       document_id: z.string().describe("Document ID from get_documents"),
@@ -321,7 +346,7 @@ pdf_base64: base64-encoded PDF string. Max file size 15 MB.`,
 
   server.tool(
     "append_document",
-    "Append pages to the end of an existing document (PATCH). Send raw base64-encoded PDF pages to append.",
+    "Append base64 PDF pages to an existing document.",
     {
       load_id: z.string().describe("Internal LoadConnex load ID"),
       document_id: z.string().describe("Document ID from get_documents"),
@@ -338,11 +363,7 @@ pdf_base64: base64-encoded PDF string. Max file size 15 MB.`,
       load_id: z.string().describe("Internal LoadConnex load ID"),
       document_id: z.string().describe("Document ID from get_documents"),
     },
-    async ({ load_id, document_id }) => {
-      const res = await fetch(`${LX_BASE}/loads/${load_id}/documents/${document_id}`, { method: "DELETE", headers: lxHeaders() });
-      if (!res.ok) { const t = await res.text(); throw new Error(`LoadConnex ${res.status}: ${t}`); }
-      return ok(await res.json());
-    }
+    async ({ load_id, document_id }) => ok(await lxDelete(`loads/${load_id}/documents/${document_id}`))
   );
 
   server.tool(
@@ -360,16 +381,16 @@ pdf_base64: base64-encoded PDF string. Max file size 15 MB.`,
 
   server.tool(
     "list_drivers",
-    "List WPL drivers. Filter by name or availability. Drivers are synced from ELD — use update_driver to edit details.",
+    "List WPL drivers. Synced from ELD.",
     {
       filter_full_name: z.string().describe("Partial driver name").optional(),
       filter_available: z.boolean().describe("Filter by availability. Omit to get all drivers.").optional(),
-      per_page: z.number().int().min(1).max(100).default(25).optional(),
+      per_page: z.number().int().min(1).max(100).default(100).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
       sort: z.string().describe("Sort keys: full_name, available, mobile_app_status. E.g. 'full_name:asc'").optional(),
     },
     async ({ filter_full_name, filter_available, per_page, page_no, sort }) =>
-      ok(await lxFetch("drivers", { filter_full_name, filter_available, per_page: per_page ?? 25, page_no: page_no ?? 1, sort }))
+      ok(await lxFetch("drivers", { filter_full_name, filter_available, per_page: per_page ?? 100, page_no: page_no ?? 1, sort }))
   );
 
   server.tool(
@@ -381,9 +402,7 @@ pdf_base64: base64-encoded PDF string. Max file size 15 MB.`,
 
   server.tool(
     "create_driver",
-    `Create a new driver (POST /drivers). Required: first_name, available.
-Name, email, mobile phone, and licence number must be unique per member.
-Phone format: (ddd) ddd-dddd. Dates: YYYY-MM-DD.`,
+    "Create a driver. Name/email/phone/licence must be unique. Phone: (ddd) ddd-dddd. Dates: YYYY-MM-DD.",
     {
       first_name: z.string().describe("Driver first name (required)"),
       last_name: z.string().optional(),
@@ -400,7 +419,7 @@ Phone format: (ddd) ddd-dddd. Dates: YYYY-MM-DD.`,
 
   server.tool(
     "update_driver",
-    "Full replace of a driver record (PUT). Must include ALL fields — omitted fields are deleted. Use get_driver first to retrieve current values.",
+    "Full replace of a driver (PUT). ALL fields required. Use get_driver first.",
     {
       driver_id: z.string().describe("LoadConnex driver ID"),
       first_name: z.string(),
@@ -420,27 +439,23 @@ Phone format: (ddd) ddd-dddd. Dates: YYYY-MM-DD.`,
     "delete_driver",
     "Delete a driver from LoadConnex. Permanent.",
     { driver_id: z.string().describe("LoadConnex driver ID") },
-    async ({ driver_id }) => {
-      const res = await fetch(`${LX_BASE}/drivers/${driver_id}`, { method: "DELETE", headers: lxHeaders() });
-      if (!res.ok) { const t = await res.text(); throw new Error(`LoadConnex ${res.status}: ${t}`); }
-      return ok(await res.json());
-    }
+    async ({ driver_id }) => ok(await lxDelete(`drivers/${driver_id}`))
   );
 
   // ── Tractors ──────────────────────────────────────────────
 
   server.tool(
     "list_tractors",
-    "List WPL tractors. Tractors are synced from ELD provider.",
+    "List WPL tractors. Synced from ELD.",
     {
       filter_unit_number: z.string().describe("Partial tractor unit number").optional(),
       filter_available: z.boolean().optional(),
-      per_page: z.number().int().min(1).max(100).default(25).optional(),
+      per_page: z.number().int().min(1).max(100).default(100).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
       sort: z.string().describe("Sort keys: unit_number, vin, available").optional(),
     },
     async ({ filter_unit_number, filter_available, per_page, page_no, sort }) =>
-      ok(await lxFetch("tractors", { filter_unit_number, filter_available, per_page: per_page ?? 25, page_no: page_no ?? 1, sort }))
+      ok(await lxFetch("tractors", { filter_unit_number, filter_available, per_page: per_page ?? 100, page_no: page_no ?? 1, sort }))
   );
 
   server.tool(
@@ -452,7 +467,7 @@ Phone format: (ddd) ddd-dddd. Dates: YYYY-MM-DD.`,
 
   server.tool(
     "update_tractor",
-    "Full replace of a tractor record (PUT). Must include ALL fields — omitted fields are deleted. Use get_tractor first.",
+    "Full replace of a tractor (PUT). ALL fields required. Use get_tractor first.",
     {
       tractor_id: z.string().describe("LoadConnex tractor ID"),
       unit_number: z.string().describe("Tractor unit number (must be unique)"),
@@ -473,12 +488,12 @@ Phone format: (ddd) ddd-dddd. Dates: YYYY-MM-DD.`,
       filter_unit_number: z.string().optional(),
       filter_trailer_type: z.string().optional(),
       filter_available: z.boolean().optional(),
-      per_page: z.number().int().min(1).max(100).default(25).optional(),
+      per_page: z.number().int().min(1).max(100).default(100).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
       sort: z.string().describe("Sort keys: unit_number, trailer_type, available").optional(),
     },
     async ({ filter_unit_number, filter_trailer_type, filter_available, per_page, page_no, sort }) =>
-      ok(await lxFetch("trailers", { filter_unit_number, filter_trailer_type, filter_available, per_page: per_page ?? 25, page_no: page_no ?? 1, sort }))
+      ok(await lxFetch("trailers", { filter_unit_number, filter_trailer_type, filter_available, per_page: per_page ?? 100, page_no: page_no ?? 1, sort }))
   );
 
   server.tool(
@@ -501,7 +516,7 @@ Phone format: (ddd) ddd-dddd. Dates: YYYY-MM-DD.`,
 
   server.tool(
     "update_trailer",
-    "Full replace of a trailer record (PUT). Must include ALL fields. Use get_trailer first.",
+    "Full replace of a trailer (PUT). ALL fields required. Use get_trailer first.",
     {
       trailer_id: z.string().describe("LoadConnex trailer ID"),
       unit_number: z.string(),
@@ -515,11 +530,7 @@ Phone format: (ddd) ddd-dddd. Dates: YYYY-MM-DD.`,
     "delete_trailer",
     "Delete a trailer from LoadConnex. Permanent.",
     { trailer_id: z.string().describe("LoadConnex trailer ID") },
-    async ({ trailer_id }) => {
-      const res = await fetch(`${LX_BASE}/trailers/${trailer_id}`, { method: "DELETE", headers: lxHeaders() });
-      if (!res.ok) { const t = await res.text(); throw new Error(`LoadConnex ${res.status}: ${t}`); }
-      return ok(await res.json());
-    }
+    async ({ trailer_id }) => ok(await lxDelete(`trailers/${trailer_id}`))
   );
 
   return server;
