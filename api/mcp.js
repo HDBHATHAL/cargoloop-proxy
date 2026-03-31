@@ -71,6 +71,7 @@ function cacheSet(key, data) {
 }
 
 // Invalidate all cached entries for a load and its sub-resources after a write
+// Note: my_carriers are read-only from this proxy — no write invalidation needed
 function cacheInvalidateLoad(load_id) {
   for (const k of cache.keys()) {
     if (k.includes(`/loads/${load_id}`) || k.includes("loads?") || k.endsWith("/loads")) {
@@ -114,7 +115,7 @@ function ttlForPath(path) {
   if (path.includes("/documents")) return CACHE_TTL.docs;
   if (path.match(/^loads\/\d+$/)) return CACHE_TTL.load;
   if (path.startsWith("loads")) return CACHE_TTL.loads;
-  if (path.startsWith("drivers") || path.startsWith("tractors") || path.startsWith("trailers")) return CACHE_TTL.fleet;
+  if (path.startsWith("drivers") || path.startsWith("tractors") || path.startsWith("trailers") || path.startsWith("my_carriers")) return CACHE_TTL.fleet;
   return CACHE_TTL.loads;
 }
 
@@ -164,7 +165,7 @@ function ok(data) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.3.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.4.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -531,6 +532,73 @@ function createServer() {
     "Delete a trailer from LoadConnex. Permanent.",
     { trailer_id: z.string().describe("LoadConnex trailer ID") },
     async ({ trailer_id }) => ok(await lxDelete(`trailers/${trailer_id}`))
+  );
+
+
+  // ═══════════════════════════════════════════════════════════
+  // SEGMENT 4 — MY CARRIERS
+  // ═══════════════════════════════════════════════════════════
+
+  server.tool(
+    "list_my_carriers",
+    "List My Carriers (trusted carriers with a direct member relationship). Sort keys: company_name, city, state.",
+    {
+      filter_company_name: z.string().describe("Partial carrier company name").optional(),
+      sort: z.string().describe("Sort keys: company_name, city, state. E.g. 'company_name:asc'").optional(),
+      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      page_no: z.number().int().min(1).default(1).optional(),
+    },
+    async ({ filter_company_name, sort, per_page, page_no }) =>
+      ok(await lxFetch("my_carriers", { filter_company_name, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 }))
+  );
+
+  server.tool(
+    "get_my_carrier",
+    "Get full details for a single My Carrier by ID. Returns company name, city, state, phone, and sub-resource URLs for their drivers/tractors/trailers.",
+    { my_carrier_id: z.string().describe("My Carrier ID from list_my_carriers") },
+    async ({ my_carrier_id }) => ok(await lxFetch(`my_carriers/${my_carrier_id}`))
+  );
+
+  server.tool(
+    "list_my_carrier_drivers",
+    "List drivers belonging to a specific My Carrier. Sort key: full_name.",
+    {
+      my_carrier_id: z.string().describe("My Carrier ID"),
+      filter_full_name: z.string().describe("Partial driver name").optional(),
+      sort: z.string().describe("Sort key: full_name. E.g. 'full_name:asc'").optional(),
+      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      page_no: z.number().int().min(1).default(1).optional(),
+    },
+    async ({ my_carrier_id, filter_full_name, sort, per_page, page_no }) =>
+      ok(await lxFetch(`my_carriers/${my_carrier_id}/drivers`, { filter_full_name, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 }))
+  );
+
+  server.tool(
+    "list_my_carrier_tractors",
+    "List tractors belonging to a specific My Carrier. Sort key: unit_number.",
+    {
+      my_carrier_id: z.string().describe("My Carrier ID"),
+      filter_unit_number: z.string().describe("Partial tractor unit number").optional(),
+      sort: z.string().describe("Sort key: unit_number").optional(),
+      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      page_no: z.number().int().min(1).default(1).optional(),
+    },
+    async ({ my_carrier_id, filter_unit_number, sort, per_page, page_no }) =>
+      ok(await lxFetch(`my_carriers/${my_carrier_id}/tractors`, { filter_unit_number, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 }))
+  );
+
+  server.tool(
+    "list_my_carrier_trailers",
+    "List trailers belonging to a specific My Carrier. Sort key: unit_number.",
+    {
+      my_carrier_id: z.string().describe("My Carrier ID"),
+      filter_unit_number: z.string().describe("Partial trailer unit number").optional(),
+      sort: z.string().describe("Sort key: unit_number").optional(),
+      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      page_no: z.number().int().min(1).default(1).optional(),
+    },
+    async ({ my_carrier_id, filter_unit_number, sort, per_page, page_no }) =>
+      ok(await lxFetch(`my_carriers/${my_carrier_id}/trailers`, { filter_unit_number, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 }))
   );
 
   return server;
