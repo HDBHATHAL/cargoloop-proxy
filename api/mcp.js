@@ -164,8 +164,18 @@ function ok(data) {
   return { content: [{ type: "text", text: JSON.stringify(data) }] };
 }
 
+// ── Inject readOnly-but-required defaults for LoadConnex ────
+// The swagger marks stop_tracking_status and load_tracking_status as both
+// "required" and "readOnly". The API sometimes rejects POSTs/PUTs without them.
+function prepareStops(stops) {
+  return stops.map(s => ({
+    stop_tracking_status: "Pending",
+    ...s,
+  }));
+}
+
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.5.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.6.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -216,6 +226,17 @@ function createServer() {
       customer_code: z.string().describe("Customer code to link the load to a customer").optional(),
       customer_reference_number: z.string().describe("Customer's reference number for this load").optional(),
       additional_instructions: z.string().describe("Special instructions for the driver").optional(),
+      billing_info: z.array(z.object({
+        line_item: z.string().describe("Line item name (e.g. 'LINE HAUL', 'FUEL SURCHARGE', 'ACCESSORIALS')"),
+        receivable: z.object({
+          amount: z.number().int().describe("Amount in cents USD"),
+          currency: z.enum(["USD"]).default("USD"),
+        }).describe("Amount to invoice customer").optional(),
+        payable: z.object({
+          amount: z.number().int().describe("Amount in cents USD"),
+          currency: z.enum(["USD"]).default("USD"),
+        }).describe("Amount to pay carrier/broker").optional(),
+      })).describe("Array of billing line items with receivable and/or payable amounts in cents USD").optional(),
       stops: z.array(z.object({
         stop_no: z.number().int().min(1).max(10),
         type: z.enum(["Pickup","Delivery"]),
@@ -230,12 +251,21 @@ function createServer() {
         contact_name: z.string().optional(),
       })).min(2).max(10).describe("Array of stops. First must be Pickup, last must be Delivery."),
     },
-    async ({ member_load_number, trailer_type, weight, commodity, max_cargo_value, post_to_marketplace, customer_code, customer_reference_number, additional_instructions, stops }) => {
-      const body = { trailer_type, weight, commodity, max_cargo_value: { amount: max_cargo_value, currency: "USD" }, post_to_marketplace, stops };
+    async ({ member_load_number, trailer_type, weight, commodity, max_cargo_value, post_to_marketplace, customer_code, customer_reference_number, additional_instructions, billing_info, stops }) => {
+      const body = {
+        trailer_type,
+        weight,
+        commodity,
+        max_cargo_value: { amount: max_cargo_value, currency: "USD" },
+        post_to_marketplace,
+        load_tracking_status: "Pending",
+        stops: prepareStops(stops),
+      };
       if (member_load_number) body.member_load_number = member_load_number;
       if (customer_code) body.customer_code = customer_code;
       if (customer_reference_number) body.customer_reference_number = customer_reference_number;
       if (additional_instructions) body.additional_instructions = additional_instructions;
+      if (billing_info) body.billing_info = billing_info;
       return ok(await lxWrite("POST", "loads", body));
     }
   );
@@ -267,7 +297,14 @@ function createServer() {
         contact_name: z.string().optional(),
       })).min(2).max(10),
     },
-    async ({ load_id, ...fields }) => ok(await lxWrite("PUT", `loads/${load_id}`, fields))
+    async ({ load_id, stops, ...fields }) => {
+      const body = {
+        ...fields,
+        load_tracking_status: "Pending",
+        stops: prepareStops(stops),
+      };
+      return ok(await lxWrite("PUT", `loads/${load_id}`, body));
+    }
   );
 
   server.tool(
