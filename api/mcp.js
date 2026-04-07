@@ -175,7 +175,7 @@ function prepareStops(stops) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.6.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.7.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -279,9 +279,21 @@ function createServer() {
       trailer_type: z.enum(["Dry Van","Refrigerated","Flatbed","Step Deck","Lowboy","Double Drop","Conestoga","Curtainside","Tanker","Pneumatic","Hopper","Dump","Other"]),
       weight: z.number().int().min(0).max(99999),
       commodity: z.string(),
+      max_cargo_value: z.number().int().describe("Max cargo value in cents USD (e.g. 1000000 = $10,000). Required — omitting deletes the value."),
       customer_code: z.string().optional(),
       customer_reference_number: z.string().optional(),
       additional_instructions: z.string().optional(),
+      billing_info: z.array(z.object({
+        line_item: z.string().describe("Line item name (e.g. 'LINE HAUL', 'FUEL SURCHARGE', 'ACCESSORIALS')"),
+        receivable: z.object({
+          amount: z.number().int().describe("Amount in cents USD"),
+          currency: z.enum(["USD"]).default("USD"),
+        }).describe("Amount to invoice customer").optional(),
+        payable: z.object({
+          amount: z.number().int().describe("Amount in cents USD"),
+          currency: z.enum(["USD"]).default("USD"),
+        }).describe("Amount to pay carrier/broker").optional(),
+      })).describe("Array of billing line items. Omitting deletes all billing.").optional(),
       post_to_marketplace: z.enum(["no","private_carriers_only","private_with_brokers","public_no_brokers","all","no_change"]),
       stops: z.array(z.object({
         stop_no: z.number().int().min(1).max(10),
@@ -297,12 +309,14 @@ function createServer() {
         contact_name: z.string().optional(),
       })).min(2).max(10),
     },
-    async ({ load_id, stops, ...fields }) => {
+    async ({ load_id, stops, max_cargo_value, billing_info, ...fields }) => {
       const body = {
         ...fields,
+        max_cargo_value: { amount: max_cargo_value, currency: "USD" },
         load_tracking_status: "Pending",
         stops: prepareStops(stops),
       };
+      if (billing_info) body.billing_info = billing_info;
       return ok(await lxWrite("PUT", `loads/${load_id}`, body));
     }
   );
