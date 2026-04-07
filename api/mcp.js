@@ -266,6 +266,7 @@ function createServer() {
       if (customer_reference_number) body.customer_reference_number = customer_reference_number;
       if (additional_instructions) body.additional_instructions = additional_instructions;
       if (billing_info) body.billing_info = billing_info;
+      console.log("create_load body:", JSON.stringify(body));
       return ok(await lxWrite("POST", "loads", body));
     }
   );
