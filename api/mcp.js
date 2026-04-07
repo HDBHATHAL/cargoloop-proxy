@@ -185,7 +185,7 @@ function createServer() {
     "get_loads",
     "Fetch WPL load summaries. filter_life_cycle required. Dates: YYYY-MM-DDTHH:mmZ. Returns up to 100 per page.",
     {
-      filter_life_cycle: z.enum(["In Transit", "Delivered", "Pending", "Cancelled", "Completed"]).describe("Required. Lifecycle stage to filter by."),
+      filter_life_cycle: z.enum(["In Transit", "Delivered", "Upcoming", "Cancelled", "Completed"]).describe("Required. Lifecycle stage to filter by."),
       filter_customer_name: z.string().describe("Partial customer name (e.g. 'Mastronardi', 'Sunset')").optional(),
       filter_load_number: z.string().describe("Partial WPL member load number (not LX load number)").optional(),
       filter_carrier_driver_tractor: z.string().describe("Partial carrier company name, driver full name, or tractor unit number").optional(),
@@ -266,7 +266,6 @@ function createServer() {
       if (customer_reference_number) body.customer_reference_number = customer_reference_number;
       if (additional_instructions) body.additional_instructions = additional_instructions;
       if (billing_info) body.billing_info = billing_info;
-      console.log("create_load body:", JSON.stringify(body));
       return ok(await lxWrite("POST", "loads", body));
     }
   );
