@@ -116,12 +116,13 @@ function normalizeLoadForPut(load) {
     }));
   }
 
-  // stops: normalize type enum, country, and re-inject stop_tracking_status
+  // stops: normalize type enum, country (LX wants 2-letter "US" not "USA"),
+  // and re-inject stop_tracking_status
   if (Array.isArray(out.stops)) {
     out.stops = out.stops.map(s => ({
       ...s,
       type: s.type === "1" ? "Pickup" : s.type === "2" ? "Delivery" : s.type,
-      country: s.country || "USA",
+      country: s.country || "US",
       stop_tracking_status: "Pending",
     }));
   }
@@ -229,7 +230,7 @@ function prepareStops(stops) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.11.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.11.1" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -412,6 +413,9 @@ function createServer() {
       // LX requires PUT full-replace on loads/{id}; fetch current, normalize, merge
       const current = await lxFetch(`loads/${load_id}`);
       const body = normalizeLoadForPut(current);
+      // GET doesn't echo top-level post_to_marketplace; inject "no_change"
+      // so a status-only update doesn't alter marketplace visibility
+      body.post_to_marketplace = "no_change";
       if (tracking_status) body.load_tracking_status = tracking_status;
       if (notes !== undefined) body.notes = notes;
       return ok(await lxWrite("PUT", `loads/${load_id}`, body));
