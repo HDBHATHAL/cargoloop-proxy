@@ -80,6 +80,60 @@ function cacheInvalidateLoad(load_id) {
   }
 }
 
+// ── LoadConnex response normalization ──────────────────────
+// LX's GET loads/{id} response echoes enum codes and nulls that its
+// own PUT validator rejects. This helper converts a GET-shape load back
+// into a PUT-safe shape. Used by any tool that reads-then-writes.
+// Key rules:
+//   - Currency is ALWAYS "USD". LX echoes null on read which fails its own
+//     validator on write. Never pass through the echoed null.
+//   - Stop type is "1"/"2" on read, "Pickup"/"Delivery" on write.
+//   - Null country → "USA".
+//   - hauled_by.type "None" (unassigned read) → "Not Assigned" (unassigned write).
+//   - Strip computed/tracking-only fields that LX rejects on PUT.
+function normalizeLoadForPut(load) {
+  // Clone and strip LX read-only/computed fields
+  const {
+    id, loaded_miles, tracking_latitude, tracking_longitude,
+    tracking_latest_position_utc_date_time, url_for_api, life_cycle,
+    ...out
+  } = load;
+
+  // max_cargo_value: force currency USD
+  if (out.max_cargo_value && typeof out.max_cargo_value === "object") {
+    out.max_cargo_value = {
+      amount: out.max_cargo_value.amount,
+      currency: "USD",
+    };
+  }
+
+  // billing_info: force currency USD on all receivable/payable
+  if (Array.isArray(out.billing_info)) {
+    out.billing_info = out.billing_info.map(item => ({
+      line_item: item.line_item,
+      ...(item.receivable && { receivable: { amount: item.receivable.amount, currency: "USD" } }),
+      ...(item.payable && { payable: { amount: item.payable.amount, currency: "USD" } }),
+    }));
+  }
+
+  // stops: normalize type enum, country, and re-inject stop_tracking_status
+  if (Array.isArray(out.stops)) {
+    out.stops = out.stops.map(s => ({
+      ...s,
+      type: s.type === "1" ? "Pickup" : s.type === "2" ? "Delivery" : s.type,
+      country: s.country || "USA",
+      stop_tracking_status: "Pending",
+    }));
+  }
+
+  // hauled_by: "None" (unassigned read) → "Not Assigned" (unassigned write)
+  if (out.hauled_by && out.hauled_by.type === "None") {
+    out.hauled_by = { ...out.hauled_by, type: "Not Assigned" };
+  }
+
+  return out;
+}
+
 // ── Core fetch with rate limiting + retry ───────────────────
 async function lxRequest(fetchFn, retries = 6) {
   await rateLimiter.acquire();
@@ -175,7 +229,7 @@ function prepareStops(stops) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.10.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.11.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -332,8 +386,10 @@ function createServer() {
     },
     async ({ load_id, stops, max_cargo_value, billing_info, ...fields }) => {
       const current = await lxFetch(`loads/${load_id}`);
+      const normalized = normalizeLoadForPut(current);
       const body = {
-        ...fields,
+        ...normalized,      // base from current (preserves caller-omitted fields like hauled_by, customer_code)
+        ...fields,          // caller scalar overrides
         lx_load_number: current.lx_load_number,
         max_cargo_value: { amount: max_cargo_value, currency: "USD" },
         load_tracking_status: "Pending",
@@ -353,9 +409,9 @@ function createServer() {
       notes: z.string().optional(),
     },
     async ({ load_id, tracking_status, notes }) => {
-      // LX requires PUT full-replace on loads/{id}; fetch current and merge
+      // LX requires PUT full-replace on loads/{id}; fetch current, normalize, merge
       const current = await lxFetch(`loads/${load_id}`);
-      const body = { ...current };
+      const body = normalizeLoadForPut(current);
       if (tracking_status) body.load_tracking_status = tracking_status;
       if (notes !== undefined) body.notes = notes;
       return ok(await lxWrite("PUT", `loads/${load_id}`, body));

@@ -54,7 +54,7 @@ Use addresses from previously successful loads or well-known commercial location
 
 ## Currency & Money Fields
 
-All monetary values use **cents USD** (smallest denomination).
+All monetary values use **cents USD** (smallest denomination). **Currency is always `"USD"`** — there is no multi-currency support, and any nullish currency in a PUT body will fail validation.
 
 | Dollar Amount | Cents Value |
 |--------------|-------------|
@@ -68,6 +68,18 @@ All monetary values use **cents USD** (smallest denomination).
 - **Proxy transforms to:** `{ "amount": 10000000, "currency": "USD" }`
 - **Valid range:** `0` to `10000000` (max $100,000.00)
 - Values above 10,000,000 return `400 invalid_value`
+
+### ⚠️ Currency Null Trap (LX GET → PUT)
+
+LoadConnex's `GET /loads/{id}` response echoes `currency: null` on every money-shaped field (`max_cargo_value`, `billing_info[].receivable`, `billing_info[].payable`) — even when the load was created with `"USD"`. **If that null is passed back in a PUT body, LX rejects with a misleading error:**
+
+```
+400 invalid_value: Parameter: max_cargo_value invalid value; allowed values are: 0-10000000
+```
+
+The error message points at `max_cargo_value` but the actual offending field is the null `currency`. LX's validator chains produce a misattributed error.
+
+**Rule:** any tool that reads a load and writes it back MUST force `currency = "USD"` on every money field before PUT. The proxy's `normalizeLoadForPut()` helper (mcp.js) does this automatically for `update_load` and `update_load_status`. Do not bypass it.
 
 ---
 
