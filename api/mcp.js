@@ -81,7 +81,7 @@ function cacheInvalidateLoad(load_id) {
 }
 
 // ── Core fetch with rate limiting + retry ───────────────────
-async function lxRequest(fetchFn, retries = 3) {
+async function lxRequest(fetchFn, retries = 6) {
   await rateLimiter.acquire();
   for (let attempt = 0; attempt <= retries; attempt++) {
     const res = await fetchFn();
@@ -175,7 +175,7 @@ function prepareStops(stops) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.9.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.10.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -197,11 +197,11 @@ function createServer() {
       filter_pickup_city_state: z.string().describe("Pickup city and state (e.g. 'Oxnard, CA')").optional(),
       filter_delivery_city_state: z.string().describe("Delivery city and state (e.g. 'Philadelphia, PA')").optional(),
       sort: z.string().describe("Comma-separated sort keys with optional :asc/:desc. Allowed: member_load_number, customer_name, pickup_date_time_local, pickup_city_state, delivery_date_time_local, delivery_city_state, load_tracking_status, carrier_name, driver_name, tractor_unit_number. Max 3.").optional(),
-      per_page: z.number().int().min(1).max(100).default(100).describe("Results per page (1-100). Default 100."),
+      per_page: z.number().int().min(1).max(25).default(25).describe("Results per page (1-25). Default 25. LoadConnex silently caps at 25 regardless of requested value."),
       page_no: z.number().int().min(1).default(1).describe("Page number. Default 1."),
     },
     async ({ filter_life_cycle, filter_customer_name, filter_load_number, filter_carrier_driver_tractor, filter_status, filter_pickup_date_time_local_from, filter_pickup_date_time_local_to, filter_delivery_date_time_local_from, filter_delivery_date_time_local_to, filter_pickup_city_state, filter_delivery_city_state, sort, per_page, page_no }) => {
-      const data = await lxFetch("loads", { filter_life_cycle, filter_customer_name, filter_load_number, filter_carrier_driver_tractor, filter_status, filter_pickup_date_time_local_from, filter_pickup_date_time_local_to, filter_delivery_date_time_local_from, filter_delivery_date_time_local_to, filter_pickup_city_state, filter_delivery_city_state, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 });
+      const data = await lxFetch("loads", { filter_life_cycle, filter_customer_name, filter_load_number, filter_carrier_driver_tractor, filter_status, filter_pickup_date_time_local_from, filter_pickup_date_time_local_to, filter_delivery_date_time_local_from, filter_delivery_date_time_local_to, filter_pickup_city_state, filter_delivery_city_state, sort, per_page: per_page ?? 25, page_no: page_no ?? 1 });
       return ok(data);
     }
   );
@@ -284,7 +284,6 @@ function createServer() {
     "Full replace of a load (PUT). ALL fields required — omitted fields are deleted. Use get_load first. Cannot update Transfer-stop loads or Load Connex-assigned loads.",
     {
       load_id: z.string().describe("Internal LoadConnex load ID"),
-      lx_load_number: z.string().describe("LoadConnex load number from get_load (e.g. '26001108'). Required for PUT."),
       member_load_number: z.string().optional(),
       trailer_type: z.enum(["Van or Refrigerated","Van","Refrigerated","Flatbed","No Trailer / Power Only"]),
       weight: z.number().int().min(0).max(99999),
@@ -332,8 +331,10 @@ function createServer() {
       })).min(2).max(10),
     },
     async ({ load_id, stops, max_cargo_value, billing_info, ...fields }) => {
+      const current = await lxFetch(`loads/${load_id}`);
       const body = {
         ...fields,
+        lx_load_number: current.lx_load_number,
         max_cargo_value: { amount: max_cargo_value, currency: "USD" },
         load_tracking_status: "Pending",
         stops: prepareStops(stops),
@@ -352,10 +353,12 @@ function createServer() {
       notes: z.string().optional(),
     },
     async ({ load_id, tracking_status, notes }) => {
-      const body = {};
-      if (tracking_status) body.tracking_status = tracking_status;
-      if (notes) body.notes = notes;
-      return ok(await lxWrite("PATCH", `loads/${load_id}`, body));
+      // LX requires PUT full-replace on loads/{id}; fetch current and merge
+      const current = await lxFetch(`loads/${load_id}`);
+      const body = { ...current };
+      if (tracking_status) body.load_tracking_status = tracking_status;
+      if (notes !== undefined) body.notes = notes;
+      return ok(await lxWrite("PUT", `loads/${load_id}`, body));
     }
   );
 
@@ -460,12 +463,12 @@ function createServer() {
     {
       filter_full_name: z.string().describe("Partial driver name").optional(),
       filter_available: z.boolean().describe("Filter by availability. Omit to get all drivers.").optional(),
-      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      per_page: z.number().int().min(1).max(25).default(25).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
       sort: z.string().describe("Sort keys: full_name, available, mobile_app_status. E.g. 'full_name:asc'").optional(),
     },
     async ({ filter_full_name, filter_available, per_page, page_no, sort }) =>
-      ok(await lxFetch("drivers", { filter_full_name, filter_available, per_page: per_page ?? 100, page_no: page_no ?? 1, sort }))
+      ok(await lxFetch("drivers", { filter_full_name, filter_available, per_page: per_page ?? 25, page_no: page_no ?? 1, sort }))
   );
 
   server.tool(
@@ -525,12 +528,12 @@ function createServer() {
     {
       filter_unit_number: z.string().describe("Partial tractor unit number").optional(),
       filter_available: z.boolean().optional(),
-      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      per_page: z.number().int().min(1).max(25).default(25).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
       sort: z.string().describe("Sort keys: unit_number, vin, available").optional(),
     },
     async ({ filter_unit_number, filter_available, per_page, page_no, sort }) =>
-      ok(await lxFetch("tractors", { filter_unit_number, filter_available, per_page: per_page ?? 100, page_no: page_no ?? 1, sort }))
+      ok(await lxFetch("tractors", { filter_unit_number, filter_available, per_page: per_page ?? 25, page_no: page_no ?? 1, sort }))
   );
 
   server.tool(
@@ -563,12 +566,12 @@ function createServer() {
       filter_unit_number: z.string().optional(),
       filter_trailer_type: z.string().optional(),
       filter_available: z.boolean().optional(),
-      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      per_page: z.number().int().min(1).max(25).default(25).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
       sort: z.string().describe("Sort keys: unit_number, trailer_type, available").optional(),
     },
     async ({ filter_unit_number, filter_trailer_type, filter_available, per_page, page_no, sort }) =>
-      ok(await lxFetch("trailers", { filter_unit_number, filter_trailer_type, filter_available, per_page: per_page ?? 100, page_no: page_no ?? 1, sort }))
+      ok(await lxFetch("trailers", { filter_unit_number, filter_trailer_type, filter_available, per_page: per_page ?? 25, page_no: page_no ?? 1, sort }))
   );
 
   server.tool(
@@ -619,11 +622,11 @@ function createServer() {
     {
       filter_company_name: z.string().describe("Partial carrier company name").optional(),
       sort: z.string().describe("Sort keys: company_name, city, state. E.g. 'company_name:asc'").optional(),
-      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      per_page: z.number().int().min(1).max(25).default(25).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
     },
     async ({ filter_company_name, sort, per_page, page_no }) =>
-      ok(await lxFetch("my_carriers", { filter_company_name, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 }))
+      ok(await lxFetch("my_carriers", { filter_company_name, sort, per_page: per_page ?? 25, page_no: page_no ?? 1 }))
   );
 
   server.tool(
@@ -640,11 +643,11 @@ function createServer() {
       my_carrier_id: z.string().describe("My Carrier ID"),
       filter_full_name: z.string().describe("Partial driver name").optional(),
       sort: z.string().describe("Sort key: full_name. E.g. 'full_name:asc'").optional(),
-      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      per_page: z.number().int().min(1).max(25).default(25).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
     },
     async ({ my_carrier_id, filter_full_name, sort, per_page, page_no }) =>
-      ok(await lxFetch(`my_carriers/${my_carrier_id}/drivers`, { filter_full_name, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 }))
+      ok(await lxFetch(`my_carriers/${my_carrier_id}/drivers`, { filter_full_name, sort, per_page: per_page ?? 25, page_no: page_no ?? 1 }))
   );
 
   server.tool(
@@ -654,11 +657,11 @@ function createServer() {
       my_carrier_id: z.string().describe("My Carrier ID"),
       filter_unit_number: z.string().describe("Partial tractor unit number").optional(),
       sort: z.string().describe("Sort key: unit_number").optional(),
-      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      per_page: z.number().int().min(1).max(25).default(25).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
     },
     async ({ my_carrier_id, filter_unit_number, sort, per_page, page_no }) =>
-      ok(await lxFetch(`my_carriers/${my_carrier_id}/tractors`, { filter_unit_number, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 }))
+      ok(await lxFetch(`my_carriers/${my_carrier_id}/tractors`, { filter_unit_number, sort, per_page: per_page ?? 25, page_no: page_no ?? 1 }))
   );
 
   server.tool(
@@ -668,11 +671,11 @@ function createServer() {
       my_carrier_id: z.string().describe("My Carrier ID"),
       filter_unit_number: z.string().describe("Partial trailer unit number").optional(),
       sort: z.string().describe("Sort key: unit_number").optional(),
-      per_page: z.number().int().min(1).max(100).default(100).optional(),
+      per_page: z.number().int().min(1).max(25).default(25).optional(),
       page_no: z.number().int().min(1).default(1).optional(),
     },
     async ({ my_carrier_id, filter_unit_number, sort, per_page, page_no }) =>
-      ok(await lxFetch(`my_carriers/${my_carrier_id}/trailers`, { filter_unit_number, sort, per_page: per_page ?? 100, page_no: page_no ?? 1 }))
+      ok(await lxFetch(`my_carriers/${my_carrier_id}/trailers`, { filter_unit_number, sort, per_page: per_page ?? 25, page_no: page_no ?? 1 }))
   );
 
   return server;
