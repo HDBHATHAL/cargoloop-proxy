@@ -218,7 +218,7 @@ function createServer() {
     "Create a load (POST /loads). First stop must be Pickup, last must be Delivery. Each stop's appointment_end must be after the previous. post_to_marketplace: no|private_carriers_only|private_with_brokers|public_no_brokers|all.",
     {
       member_load_number: z.string().describe("Your internal WPL load/job number (must be unique)").optional(),
-      trailer_type: z.enum(["Dry Van","Refrigerated","Flatbed","Step Deck","Lowboy","Double Drop","Conestoga","Curtainside","Tanker","Pneumatic","Hopper","Dump","Other"]).describe("Type of trailer required"),
+      trailer_type: z.enum(["Van or Refrigerated","Van","Refrigerated","Flatbed","No Trailer / Power Only"]).describe("Type of trailer required"),
       weight: z.number().int().min(0).max(99999).describe("Shipment weight in lbs"),
       commodity: z.string().describe("Commodity description (e.g. 'Produce', 'Mushrooms')"),
       max_cargo_value: z.number().int().describe("Max cargo value in cents USD (e.g. 1000000 = $10,000). Required by LoadConnex."),
@@ -276,7 +276,7 @@ function createServer() {
     {
       load_id: z.string().describe("Internal LoadConnex load ID"),
       member_load_number: z.string().optional(),
-      trailer_type: z.enum(["Dry Van","Refrigerated","Flatbed","Step Deck","Lowboy","Double Drop","Conestoga","Curtainside","Tanker","Pneumatic","Hopper","Dump","Other"]),
+      trailer_type: z.enum(["Van or Refrigerated","Van","Refrigerated","Flatbed","No Trailer / Power Only"]),
       weight: z.number().int().min(0).max(99999),
       commodity: z.string(),
       max_cargo_value: z.number().int().describe("Max cargo value in cents USD (e.g. 1000000 = $10,000). Required — omitting deletes the value."),
@@ -561,7 +561,7 @@ function createServer() {
     "Create a new trailer (POST /trailers). Unit number must be unique.",
     {
       unit_number: z.string().describe("Trailer unit number (must be unique)"),
-      trailer_type: z.enum(["Dry Van","Refrigerated","Flatbed","Step Deck","Lowboy","Double Drop","Conestoga","Curtainside","Tanker","Pneumatic","Hopper","Dump","Other"]),
+      trailer_type: z.enum(["Van or Refrigerated","Van","Refrigerated","Flatbed","No Trailer / Power Only"]),
       available: z.boolean().describe("Whether trailer can be assigned to a load"),
     },
     async (fields) => ok(await lxWrite("POST", "trailers", fields))
@@ -573,7 +573,7 @@ function createServer() {
     {
       trailer_id: z.string().describe("LoadConnex trailer ID"),
       unit_number: z.string(),
-      trailer_type: z.enum(["Dry Van","Refrigerated","Flatbed","Step Deck","Lowboy","Double Drop","Conestoga","Curtainside","Tanker","Pneumatic","Hopper","Dump","Other"]),
+      trailer_type: z.enum(["Van or Refrigerated","Van","Refrigerated","Flatbed","No Trailer / Power Only"]),
       available: z.boolean(),
     },
     async ({ trailer_id, ...fields }) => ok(await lxWrite("PUT", `trailers/${trailer_id}`, fields))
