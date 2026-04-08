@@ -175,7 +175,7 @@ function prepareStops(stops) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.8.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.9.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -284,6 +284,7 @@ function createServer() {
     "Full replace of a load (PUT). ALL fields required — omitted fields are deleted. Use get_load first. Cannot update Transfer-stop loads or Load Connex-assigned loads.",
     {
       load_id: z.string().describe("Internal LoadConnex load ID"),
+      lx_load_number: z.string().describe("LoadConnex load number from get_load (e.g. '26001108'). Required for PUT."),
       member_load_number: z.string().optional(),
       trailer_type: z.enum(["Van or Refrigerated","Van","Refrigerated","Flatbed","No Trailer / Power Only"]),
       weight: z.number().int().min(0).max(99999),
