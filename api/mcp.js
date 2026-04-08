@@ -175,7 +175,7 @@ function prepareStops(stops) {
 }
 
 function createServer() {
-  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.7.0" });
+  const server = new McpServer({ name: "cargoloop-loadconnex", version: "2.8.0" });
 
   // ═══════════════════════════════════════════════════════════
   // SEGMENT 1 — LOADS (read + write)
@@ -226,6 +226,14 @@ function createServer() {
       customer_code: z.string().describe("Customer code to link the load to a customer").optional(),
       customer_reference_number: z.string().describe("Customer's reference number for this load").optional(),
       additional_instructions: z.string().describe("Special instructions for the driver").optional(),
+      hauled_by: z.object({
+        type: z.enum(["Not Assigned","My Truck","My Carrier","My Broker","Marketplace"]).describe("Assignment type"),
+        driver_id: z.string().describe("Driver ID from list_drivers").optional(),
+        tractor_unit_id: z.string().describe("Tractor ID from list_tractors").optional(),
+        trailer_unit_id: z.string().describe("Trailer ID from list_trailers").optional(),
+        my_carrier_id: z.string().describe("Carrier ID (required for My Carrier)").optional(),
+        my_broker_unit_id: z.string().describe("Broker ID (required for My Broker)").optional(),
+      }).describe("Load assignment at creation. My Truck: driver_id + tractor_unit_id + trailer_unit_id.").optional(),
       billing_info: z.array(z.object({
         line_item: z.string().describe("Line item name (e.g. 'LINE HAUL', 'FUEL SURCHARGE', 'ACCESSORIALS')"),
         receivable: z.object({
@@ -251,7 +259,7 @@ function createServer() {
         contact_name: z.string().optional(),
       })).min(2).max(10).describe("Array of stops. First must be Pickup, last must be Delivery."),
     },
-    async ({ member_load_number, trailer_type, weight, commodity, max_cargo_value, post_to_marketplace, customer_code, customer_reference_number, additional_instructions, billing_info, stops }) => {
+    async ({ member_load_number, trailer_type, weight, commodity, max_cargo_value, post_to_marketplace, customer_code, customer_reference_number, additional_instructions, hauled_by, billing_info, stops }) => {
       const body = {
         trailer_type,
         weight,
@@ -265,6 +273,7 @@ function createServer() {
       if (customer_code) body.customer_code = customer_code;
       if (customer_reference_number) body.customer_reference_number = customer_reference_number;
       if (additional_instructions) body.additional_instructions = additional_instructions;
+      if (hauled_by) body.hauled_by = hauled_by;
       if (billing_info) body.billing_info = billing_info;
       return ok(await lxWrite("POST", "loads", body));
     }
@@ -294,6 +303,18 @@ function createServer() {
           currency: z.enum(["USD"]).default("USD"),
         }).describe("Amount to pay carrier/broker").optional(),
       })).describe("Array of billing line items. Omitting deletes all billing.").optional(),
+      hauled_by: z.object({
+        type: z.enum(["Not Assigned","My Truck","My Carrier","My Broker","Marketplace"]).describe("Assignment type"),
+        driver_id: z.string().describe("Driver ID from list_drivers").optional(),
+        tractor_unit_id: z.string().describe("Tractor ID from list_tractors").optional(),
+        trailer_unit_id: z.string().describe("Trailer ID from list_trailers").optional(),
+        my_carrier_id: z.string().describe("Carrier ID from list_my_carriers (required for My Carrier)").optional(),
+        my_broker_unit_id: z.string().describe("Broker ID (required for My Broker)").optional(),
+        tractor_unit_number: z.string().describe("Tractor unit number (My Broker only)").optional(),
+        trailer_unit_number: z.string().describe("Trailer unit number (My Broker only)").optional(),
+        driver_mobile_phone: z.string().describe("Driver phone (My Broker only)").optional(),
+        post_to_marketplace: z.enum(["private_carriers_only","private_with_brokers","public_no_brokers","all"]).describe("Required for Marketplace type").optional(),
+      }).describe("Load assignment. My Truck: driver_id + tractor_unit_id + trailer_unit_id. My Carrier: my_carrier_id + driver/tractor/trailer. My Broker: my_broker_unit_id + unit numbers.").optional(),
       post_to_marketplace: z.enum(["no","private_carriers_only","private_with_brokers","public_no_brokers","all","no_change"]),
       stops: z.array(z.object({
         stop_no: z.number().int().min(1).max(10),
