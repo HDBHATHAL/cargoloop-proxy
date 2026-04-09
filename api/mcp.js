@@ -1,6 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
+
+// Repo root — used to locate markdown files exposed as MCP resources.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const LX_BASE = "https://lx-api.loadconnex.com/v1";
 
@@ -737,6 +743,47 @@ function createServer() {
     async ({ my_carrier_id, filter_unit_number, sort, per_page, page_no }) =>
       ok(await lxFetch(`my_carriers/${my_carrier_id}/trailers`, { filter_unit_number, sort, per_page: per_page ?? 25, page_no: page_no ?? 1 }))
   );
+
+  // ═══════════════════════════════════════════════════════════
+  // RESOURCES — markdown reference docs in the repo
+  // Registering at least one resource auto-declares the
+  // `resources: {}` capability on this server.
+  // ═══════════════════════════════════════════════════════════
+  let mdFiles = [];
+  try {
+    mdFiles = readdirSync(REPO_ROOT)
+      .filter(f => f.toLowerCase().endsWith(".md"))
+      .sort((a, b) => {
+        // MCP_REFERENCE.md first, then alphabetical
+        if (a.toUpperCase() === "MCP_REFERENCE.MD") return -1;
+        if (b.toUpperCase() === "MCP_REFERENCE.MD") return 1;
+        return a.localeCompare(b);
+      });
+  } catch (e) {
+    console.error("Failed to enumerate markdown resources:", e);
+  }
+
+  for (const filename of mdFiles) {
+    const uri = `file:///${filename}`;
+    const absPath = join(REPO_ROOT, filename);
+    server.resource(
+      filename,
+      uri,
+      {
+        description: `${filename} from the cargoloop-proxy repo`,
+        mimeType: "text/markdown",
+      },
+      async (resourceUri) => ({
+        contents: [
+          {
+            uri: typeof resourceUri === "string" ? resourceUri : resourceUri.href,
+            mimeType: "text/markdown",
+            text: readFileSync(absPath, "utf8"),
+          },
+        ],
+      })
+    );
+  }
 
   return server;
 }
